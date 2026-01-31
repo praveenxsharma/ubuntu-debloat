@@ -1,148 +1,99 @@
 #!/bin/bash
-echo "https://github.com/PagalSarthak/Remove-snap-in-ubuntu"
-echo "thx for using our script"
+# Description: Ubuntu Snap Removal and Flatpak Setup
 
 set -e
 
+# --- Root Check ---
 if [ "$EUID" -ne 0 ]; then
   echo "Please run as root: sudo $0"
   exit 1
 fi
 
-# Function to prompt for user confirmation
+# --- Helper Functions ---
 prompt_confirmation() {
     while true; do
         read -p "$1 [y/n]: " choice
         case "$choice" in
-            y|Y ) return 0;; # Yes
-            n|N ) return 1;; # No
-            * ) echo "Please answer yes or no.";;
+            y|Y ) return 0;;
+            n|N ) return 1;;
+            * ) echo "Please answer y or n.";;
         esac
     done
 }
 
-# Function to remove all Snap packages
-remove_snap_packages() {
-    echo "Removing all Snap packages..."
-    # Get a list of all installed snap packages
-    local packages
-    packages=$(snap list | awk 'NR > 1 {print $1}')
+# --- Core Logic ---
 
-    # Loop through the list and remove each package
-    for snap_package in $packages; do
-        echo "Removing $snap_package..."
-        sudo snap remove "$snap_package" || true
-        sleep 2  # Adding a short delay to ensure the package is removed
+remove_snaps() {
+    echo "Removing Snap packages and daemon..."
+    while snap list 2>/dev/null | awk 'NR > 1 {print $1}' | grep -q .; do
+        for s in $(snap list | awk 'NR > 1 {print $1}'); do
+            snap remove --purge "$s" || true
+        done
     done
+    apt-get purge -y snapd || true
+    rm -rf ~/snap /var/snap /var/lib/snapd
 }
 
-# Function to remove Snapd service
-remove_snapd() {
-    echo "Stopping and disabling snapd service..."
-    sudo systemctl stop snapd || true
-    sudo systemctl disable snapd || true
-    sudo systemctl mask snapd || true
-
-    echo "Removing Snapd service..."
-    sudo apt-get purge -y snapd || true
+block_snap_reinstall() {
+    echo "Pinning snapd to prevent reinstallation..."
+    cat <<EOF > /etc/apt/preferences.d/nosnap.pref
+Package: snapd
+Pin: release a=*
+Pin-Priority: -10
+EOF
 }
 
-
-# Function to create a preference file to prevent Snap from being reinstalled
-create_preference_file() {
-    # check duplicated file
-    if [ -f /etc/apt/preferences.d/nosnap.pref ]; then
-      sudo rm /etc/apt/preferences.d/nosnap.pref
-    fi
-
-    echo "Creating preference file to prevent Snap from being reinstalled..."
-    echo "Package: snapd" | sudo tee /etc/apt/preferences.d/nosnap.pref > /dev/null
-    echo "Pin: release a=*" | sudo tee -a /etc/apt/preferences.d/nosnap.pref > /dev/null
-    echo "Pin-Priority: -10" | sudo tee -a /etc/apt/preferences.d/nosnap.pref > /dev/null
+install_flatpak() {
+    echo "Installing Flatpak and Flathub repository..."
+    apt-get update
+    apt-get install -y flatpak gnome-software-plugin-flatpak
+    flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 }
 
-# Function to install Firefox from Mozilla's repository
-install_firefox() {
-    echo "Adding Mozilla's APT repository and installing Firefox..."
-    sudo install -d -m 0755 /etc/apt/keyrings || handle_error "Failed to create keyrings directory"
-    wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg -O- | sudo tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null || handle_error "Failed to download Mozilla signing key"
-    echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" | sudo tee /etc/apt/sources.list.d/mozilla.list > /dev/null || handle_error "Failed to add Mozilla APT repository"
-    echo "Package: *" | sudo tee /etc/apt/preferences.d/mozilla > /dev/null
-    echo "Pin: origin packages.mozilla.org" | sudo tee -a /etc/apt/preferences.d/mozilla > /dev/null
-    echo "Pin-Priority: 1000" | sudo tee -a /etc/apt/preferences.d/mozilla > /dev/null
+install_firefox_apt() {
+    echo "Configuring Mozilla APT Repo..."
+    install -d -m 0755 /etc/apt/keyrings
+    wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg -O- | tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
+    echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" | tee /etc/apt/sources.list.d/mozilla.list > /dev/null
+    
+    cat <<EOF > /etc/apt/preferences.d/mozilla
+Package: *
+Pin: origin packages.mozilla.org
+Pin-Priority: 1000
+EOF
 
-    sudo apt-get -qq update
-
-    IS_FFESR=1
-    if prompt_confirmation "Do you want to install ESR Version?"; then
-      IS_FFESR=0
-      sudo apt-get install -qq -y firefox-esr || handle_error "Failed to install Firefox"
+    apt-get update
+    if prompt_confirmation "Install Firefox ESR? (No installs standard)"; then
+        apt-get install -y firefox-esr
     else
-      sudo apt-get install -qq -y firefox || handle_error "Failed to install Firefox"
+        apt-get install -y firefox
     fi
 }
 
-# Function to install GNOME Software
-install_gnome_software() {
-    echo "Installing GNOME Software..."
-    sudo apt install -qq -y gnome-software || handle_error "Failed to install GNOME Software"
-}
+# --- Execution ---
 
-# Function to handle errors
-handle_error() {
-    echo "Error: $1"
-    exit 1
-}
+echo "Starting System Modification..."
 
-
-# Main script execution
-echo "Starting Snap removal process..."
-
-# First, remove snapd if it's installed
-remove_snapd
-
-# Remove all Snap packages
-while snap list | awk 'NR > 1 {print $1}' | grep .; do
-    remove_snap_packages
-    echo "Waiting for Snap packages to be fully removed..."
-    sleep 5
-done
-
-# Clean up Snap directories and create a preference file
-create_preference_file
-
-IS_FIREFOX=1
-# Prompt for confirmation to install Firefox
-if prompt_confirmation "Do you want to add Mozilla's APT repository and install Firefox?"; then
-  IS_FIREFOX=0
-  install_firefox
+if prompt_confirmation "Do you want to completely remove Snap?"; then
+    remove_snaps
+    block_snap_reinstall
 fi
 
-IS_GNOME=1
-# Prompt for confirmation to install GNOME Software
-if prompt_confirmation "Do you want to install GNOME Software?"; then
-  IS_GNOME=0
-  install_gnome_software
+if prompt_confirmation "Do you want to install Flatpak and Flathub?"; then
+    install_flatpak
+    REBOOT_REQUIRED=true
 fi
 
-# report of removal and installation process
-echo "========================================"
-echo "  Snap removal process completed."
+if prompt_confirmation "Install Firefox via Mozilla APT?"; then
+    install_firefox_apt
+fi
 
-if [ "$IS_FIREFOX" -eq 0 ] || [ "$IS_GNOME" -eq 0 ]; then
-  if [ "$IS_FIREFOX" -eq 0 ]; then
-    if [ "$IS_FFESR" -eq 0 ]; then
-      echo "    - Firefox ESR"
-    else
-      echo "    - Firefox"
+if [ "$REBOOT_REQUIRED" = true ]; then
+    echo "========================================"
+    echo "Setup complete. A reboot is required to finish Flatpak integration."
+    if prompt_confirmation "Would you like to reboot now?"; then
+        reboot
     fi
-  fi
-
-  if [ "$IS_GNOME" -eq 0 ] ; then
-    echo "    - GNOME Software"
-  fi
-
-  echo "  has been installed."
+else
+    echo "Process complete. No reboot necessary."
 fi
-
-echo "========================================"
